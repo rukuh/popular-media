@@ -1,4 +1,4 @@
-# popular-movies (Fork)
+# popular-media (Fork)
 
 > [!NOTE]
 > This is a fork of the original [sjlu/popular-movies](https://github.com/sjlu/popular-movies) project, extended with additional functionality including Anime integration.
@@ -48,6 +48,29 @@ Parameters:
 - `disliked_tags=mecha`: Comma-separated list of tags to weigh negatively (AI evaluation).
 - `preferred_tags=school_club`: Comma-separated list of tags to weigh positively and handle leniently in ratings (AI evaluation).
 - `limit=5`: Limit the number of results returned.
+
+## Popular Books
+
+The `/books` endpoint returns a cached list of current New York Times bestsellers, formatted consistently with the other media endpoints:
+
+```
+http://localhost:3000/books
+```
+
+Parameters:
+- `list=combined-print-and-e-book-fiction`: NYT bestsellers list name (defaults to `combined-print-and-e-book-fiction`).
+- `limit=5`: Limit the number of results returned.
+- `clear_cache=true`: Force cache invalidation and fresh fetch.
+
+### Books Sync
+
+To synchronize current NYT bestsellers directly into Hardcover and Chaptarr:
+
+```
+POST /books/sync
+```
+
+An automated weekly sync also runs every Wednesday at 7:00 PM.
 
 ## Data Aggregation
 

@@ -139,6 +139,31 @@ describe('books - hardcover client', function () {
     expect(callCount).to.equal(1) // No retries for 401
   })
 
+  it('should throw immediately without retrying on 403 insufficient_scope', async function () {
+    let callCount = 0
+    axios.post = async () => {
+      callCount++
+      const err = new Error('Forbidden')
+      err.response = {
+        status: 403,
+        headers: { 'www-authenticate': 'Bearer realm="hardcover", error="insufficient_scope"' },
+        data: { error: 'insufficient_scope', error_description: 'Missing scopes: read:catalog' }
+      }
+      throw err
+    }
+
+    let caught = null
+    try {
+      await hardcover.graphqlRequest('query { test }', {}, 3, 50)
+    } catch (err) {
+      caught = err
+    }
+
+    expect(caught).to.not.be.null()
+    expect(caught.isInsufficientScope).to.be.true()
+    expect(callCount).to.equal(1) // No retries for insufficient_scope
+  })
+
   it('should retry and succeed after receiving HTTP 403 rate limit / forbidden response', async function () {
     let callCount = 0
     axios.post = async () => {
@@ -244,15 +269,79 @@ describe('books - chaptarr client', function () {
       author: { authorName: 'Kristin Hannah' }
     }
 
+    mockClient.put = async (url, payload) => ({ data: { id: 99, ...payload } })
+    mockClient.post = async (url, payload) => {
+      if (url === '/command') return { data: { status: 'queued' } }
+      expect(url).to.equal('/book')
+      postedPayload = payload
+      return {
+        data: {
+          id: 99,
+          title: payload.title,
+          monitored: true,
+          ebookMonitored: true
+        }
+      }
+    }
+
     const added = await chaptarr.addBook(mockClient, candidate)
     expect(added.id).to.equal(99)
     expect(postedPayload.mediaType).to.equal('ebook')
     expect(postedPayload.ebookMonitored).to.be.true()
     expect(postedPayload.monitored).to.be.true()
+    expect(postedPayload.audiobookMonitored).to.be.false()
     expect(postedPayload.author.ebookRootFolderPath).to.equal('/media/Books')
     expect(postedPayload.author.ebookQualityProfileId).to.equal(1)
     expect(postedPayload.author.ebookMetadataProfileId).to.equal(2)
+    expect(postedPayload.author.ebookMonitorExisting).to.equal(2)
+    expect(postedPayload.author.ebookMonitorFuture).to.be.false()
     expect(postedPayload.addOptions.searchForNewBook).to.be.true()
+  })
+
+  it('should ensure author has future and existing book monitoring disabled', async function () {
+    let authorUpdated = false
+    const mockClient = {
+      get: async (url) => {
+        expect(url).to.equal('/author/123')
+        return {
+          data: {
+            id: 123,
+            authorName: 'Test Author',
+            ebookMonitorFuture: true,
+            ebookMonitorExisting: 0
+          }
+        }
+      },
+      put: async (url, payload) => {
+        expect(url).to.equal('/author/123')
+        expect(payload.ebookMonitorFuture).to.be.false()
+        expect(payload.ebookMonitorExisting).to.equal(2)
+        authorUpdated = true
+        return { data: payload }
+      }
+    }
+
+    await chaptarr.ensureAuthorUnmonitored(mockClient, 123)
+    expect(authorUpdated).to.be.true()
+  })
+
+  it('should skip updating author if already configured with monitoring disabled', async function () {
+    let putCalled = false
+    const mockClient = {
+      get: async () => ({
+        data: {
+          id: 123,
+          ebookMonitorFuture: false,
+          ebookMonitorExisting: 2
+        }
+      }),
+      put: async () => {
+        putCalled = true
+      }
+    }
+
+    await chaptarr.ensureAuthorUnmonitored(mockClient, 123)
+    expect(putCalled).to.be.false()
   })
 
   it('should sync books list resolving by ISBN first then title', async function () {
@@ -275,8 +364,9 @@ describe('books - chaptarr client', function () {
       },
       post: async (url, payload) => {
         posts.push(payload.title)
-        return { data: { id: 100 + posts.length, title: payload.title } }
-      }
+        return { data: { id: 100 + posts.length, title: payload.title, monitored: true, ebookMonitored: true } }
+      },
+      put: async (url, payload) => ({ data: payload })
     })
 
     try {
@@ -288,6 +378,156 @@ describe('books - chaptarr client', function () {
       expect(lookups[1]).to.equal('Book 2 Author 2')
     } finally {
       chaptarr.getClient = origGetClient
+    }
+  })
+})
+
+describe('books - BooksIndex', function () {
+  const BooksIndex = require('../lib/books/index')
+  const nyt = require('../lib/books/nyt')
+  const chaptarr = require('../lib/books/chaptarr')
+
+  let origGetBestSellers
+  let origToken
+  let origListId
+
+  beforeEach(function () {
+    origGetBestSellers = nyt.getBestSellers
+    origToken = process.env.HARDCOVER_API_TOKEN
+    origListId = process.env.HARDCOVER_LIST_ID
+    process.env.HARDCOVER_API_TOKEN = 'mock_hc_token'
+    process.env.HARDCOVER_LIST_ID = 'mock_list_slug'
+  })
+
+  afterEach(function () {
+    nyt.getBestSellers = origGetBestSellers
+    process.env.HARDCOVER_API_TOKEN = origToken
+    process.env.HARDCOVER_LIST_ID = origListId
+  })
+
+  it('should evaluate books using NYT best sellers list', async function () {
+    const mockBooks = [
+      { title: 'The Women', author: 'Kristin Hannah' },
+      { title: 'Fourth Wing', author: 'Rebecca Yarros' }
+    ]
+    nyt.getBestSellers = async (list) => {
+      expect(list).to.equal('combined-print-and-e-book-fiction')
+      return mockBooks
+    }
+
+    const booksIndex = new BooksIndex()
+    const result = await booksIndex.evaluate()
+    expect(result).to.eql(mockBooks)
+  })
+
+  it('should allow custom list in evaluate', async function () {
+    nyt.getBestSellers = async (list) => {
+      expect(list).to.equal('hardcover-fiction')
+      return [{ title: 'Custom Book', author: 'Author' }]
+    }
+
+    const booksIndex = new BooksIndex()
+    const result = await booksIndex.evaluate({ list: 'hardcover-fiction' })
+    expect(result).to.have.length(1)
+    expect(result[0].title).to.equal('Custom Book')
+  })
+
+  it('should run sync successfully orchestrating NYT, Hardcover, and Chaptarr', async function () {
+    const mockBooks = [{ title: 'Book 1', author: 'Author 1' }]
+    nyt.getBestSellers = async () => mockBooks
+
+    const booksIndex = new BooksIndex()
+    booksIndex.syncHardcover = async (books) => {
+      expect(books).to.eql(mockBooks)
+      return { status: 'success', matched_count: 1 }
+    }
+
+    const origSyncBooks = chaptarr.syncBooks
+    chaptarr.syncBooks = async (books) => {
+      expect(books).to.eql(mockBooks)
+      return { status: 'success', matched_count: 1, synced_count: 1 }
+    }
+
+    try {
+      const result = await booksIndex.sync()
+      expect(result.status).to.equal('success')
+      expect(result.nyt_count).to.equal(1)
+      expect(result.books).to.eql(mockBooks)
+      expect(result.hardcover.status).to.equal('success')
+      expect(result.chaptarr.status).to.equal('success')
+    } finally {
+      chaptarr.syncBooks = origSyncBooks
+    }
+  })
+
+  it('should abort and return skipped status when Hardcover token encounters insufficient_scope without processing remaining books', async function () {
+    const origGetList = hardcover.getListIdAndBooks
+    const origGetISBN = hardcover.getBookByISBN
+    const origReplace = hardcover.replaceBooksInList
+
+    let isbnCalls = 0
+    let replaceCalled = false
+
+    hardcover.getListIdAndBooks = async () => ({ id: 555, listBooks: [{ id: 1 }, { id: 2 }] })
+    hardcover.getBookByISBN = async () => {
+      isbnCalls++
+      const err = new Error('Hardcover API token lacks required scope: Missing scopes: read:catalog')
+      err.isInsufficientScope = true
+      throw err
+    }
+    hardcover.replaceBooksInList = async () => {
+      replaceCalled = true
+      return { status: 'success' }
+    }
+
+    try {
+      const booksIndex = new BooksIndex()
+      const nytBooks = [
+        { title: 'Book 1', author: 'Author 1', isbn13: '111' },
+        { title: 'Book 2', author: 'Author 2', isbn13: '222' }
+      ]
+      const res = await booksIndex.syncHardcover(nytBooks)
+      expect(res.status).to.equal('skipped')
+      expect(res.reason).to.equal('insufficient_scope')
+      expect(isbnCalls).to.equal(1)
+      expect(replaceCalled).to.be.false()
+    } finally {
+      hardcover.getListIdAndBooks = origGetList
+      hardcover.getBookByISBN = origGetISBN
+      hardcover.replaceBooksInList = origReplace
+    }
+  })
+
+  it('should abort Hardcover list replacement if zero books matched from non-empty NYT list (safety threshold safeguard)', async function () {
+    const origGetList = hardcover.getListIdAndBooks
+    const origGetISBN = hardcover.getBookByISBN
+    const origSearch = hardcover.searchBookByTitleAuthor
+    const origReplace = hardcover.replaceBooksInList
+
+    let replaceCalled = false
+
+    hardcover.getListIdAndBooks = async () => ({ id: 555, listBooks: [{ id: 1 }, { id: 2 }] })
+    hardcover.getBookByISBN = async () => null
+    hardcover.searchBookByTitleAuthor = async () => null
+    hardcover.replaceBooksInList = async () => {
+      replaceCalled = true
+      return { status: 'success' }
+    }
+
+    try {
+      const booksIndex = new BooksIndex()
+      const nytBooks = [
+        { title: 'Book 1', author: 'Author 1', isbn13: '111' }
+      ]
+      const res = await booksIndex.syncHardcover(nytBooks)
+      expect(res.status).to.equal('skipped')
+      expect(res.reason).to.equal('zero_matches_safety_abort')
+      expect(replaceCalled).to.be.false()
+    } finally {
+      hardcover.getListIdAndBooks = origGetList
+      hardcover.getBookByISBN = origGetISBN
+      hardcover.searchBookByTitleAuthor = origSearch
+      hardcover.replaceBooksInList = origReplace
     }
   })
 })

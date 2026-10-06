@@ -1,5 +1,5 @@
 {
-  "name": "popular-movies",
+  "name": "popular-media",
   "version": "0.1.0",
   "description": "A library to help determine what movies to watch",
   "main": "index.js",
