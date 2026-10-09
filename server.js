@@ -204,7 +204,7 @@ const handleBooksSync = async (req, res) => {
   isSyncing = true
   try {
     const booksIndex = new BooksIndex()
-    const result = await booksIndex.sync()
+    const result = await booksIndex.sync(req.query)
     if (result) {
       const fictionBooks = result.fiction ? result.fiction.books : result.books
       const audioBooks = result.audio ? result.audio.books : null
