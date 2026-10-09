@@ -49,20 +49,21 @@ Parameters:
 - `preferred_tags=school_club`: Comma-separated list of tags to weigh positively and handle leniently in ratings (AI evaluation).
 - `limit=5`: Limit the number of results returned.
 
-## Popular Books
+### Popular Books & Audiobooks
 
-The `/books` endpoint returns a cached list of current New York Times bestsellers, formatted consistently with the other media endpoints:
+The `/books` and `/audiobooks` endpoints return cached lists of current New York Times bestsellers, formatted consistently with the other media endpoints:
 
 ```
 http://localhost:3000/books
+http://localhost:3000/audiobooks
 ```
 
 Parameters:
-- `list=combined-print-and-e-book-fiction`: NYT bestsellers list name (defaults to `combined-print-and-e-book-fiction`).
+- `list=combined-print-and-e-book-fiction`: NYT bestsellers list name (defaults to `combined-print-and-e-book-fiction` for `/books`, and `audio-fiction` for `/audiobooks`).
 - `limit=5`: Limit the number of results returned.
 - `clear_cache=true`: Force cache invalidation and fresh fetch.
 
-### Books Sync
+### Books & Audiobooks Dual Sync
 
 To synchronize current NYT bestsellers directly into Hardcover and Chaptarr:
 
@@ -70,7 +71,20 @@ To synchronize current NYT bestsellers directly into Hardcover and Chaptarr:
 POST /books/sync
 ```
 
+This triggers a dual sync:
+1. **Fiction Bestsellers (`combined-print-and-e-book-fiction`)**: Synced to Hardcover (if `HARDCOVER_LIST_ID` configured) and Chaptarr as **eBooks** (`/media/Books`).
+2. **Audio Fiction Bestsellers (`audio-fiction`)**: Synced to Hardcover (if `HARDCOVER_AUDIO_LIST_ID` configured) and Chaptarr as **audiobooks** (`/media/Audiobooks`).
+
 An automated weekly sync also runs every Wednesday at 7:00 PM.
+
+Optional environment variables:
+- `NYT_FICTION_LIST`: Defaults to `combined-print-and-e-book-fiction`.
+- `NYT_AUDIO_LIST`: Defaults to `audio-fiction`.
+- `HARDCOVER_AUDIO_LIST_ID`: Hardcover list slug for audiobook sync (optional).
+- `CHAPTARR_AUDIOBOOK_ROOT_FOLDER`: Defaults to `/media/Audiobooks`.
+- `CHAPTARR_EBOOK_ROOT_FOLDER`: Defaults to `/media/Books`.
+- `CHAPTARR_AUDIOBOOK_QUALITY_PROFILE_ID`: Defaults to `2`.
+- `CHAPTARR_EBOOK_QUALITY_PROFILE_ID`: Defaults to `1`.
 
 ## Data Aggregation
 

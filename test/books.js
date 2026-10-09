@@ -298,6 +298,54 @@ describe('books - chaptarr client', function () {
     expect(postedPayload.addOptions.searchForNewBook).to.be.true()
   })
 
+  it('should post book with correct audiobook payload to /book when mediaType is audiobook', async function () {
+    let postedPayload = null
+    const mockClient = {
+      get: async () => ({
+        data: {
+          id: 123,
+          audiobookMonitorFuture: false,
+          audiobookMonitorExisting: 2,
+          ebookMonitorFuture: false,
+          ebookMonitorExisting: 2
+        }
+      })
+    }
+
+    const candidate = {
+      title: 'Project Hail Mary',
+      author: { authorName: 'Andy Weir' }
+    }
+
+    mockClient.put = async (url, payload) => ({ data: { id: 101, ...payload } })
+    mockClient.post = async (url, payload) => {
+      if (url === '/command') return { data: { status: 'queued' } }
+      expect(url).to.equal('/book')
+      postedPayload = payload
+      return {
+        data: {
+          id: 101,
+          title: payload.title,
+          monitored: true,
+          audiobookMonitored: true
+        }
+      }
+    }
+
+    const added = await chaptarr.addBook(mockClient, candidate, 'audiobook')
+    expect(added.id).to.equal(101)
+    expect(postedPayload.mediaType).to.equal('audiobook')
+    expect(postedPayload.audiobookMonitored).to.be.true()
+    expect(postedPayload.monitored).to.be.true()
+    expect(postedPayload.ebookMonitored).to.be.false()
+    expect(postedPayload.author.audiobookRootFolderPath).to.equal('/media/Audiobooks')
+    expect(postedPayload.author.audiobookQualityProfileId).to.equal(2)
+    expect(postedPayload.author.audiobookMetadataProfileId).to.equal(1)
+    expect(postedPayload.author.audiobookMonitorExisting).to.equal(2)
+    expect(postedPayload.author.audiobookMonitorFuture).to.be.false()
+    expect(postedPayload.addOptions.searchForNewBook).to.be.true()
+  })
+
   it('should ensure author has future and existing book monitoring disabled', async function () {
     let authorUpdated = false
     const mockClient = {
@@ -322,6 +370,35 @@ describe('books - chaptarr client', function () {
     }
 
     await chaptarr.ensureAuthorUnmonitored(mockClient, 123)
+    expect(authorUpdated).to.be.true()
+  })
+
+  it('should ensure author has audiobook monitoring disabled when mediaType is audiobook', async function () {
+    let authorUpdated = false
+    const mockClient = {
+      get: async (url) => {
+        expect(url).to.equal('/author/123')
+        return {
+          data: {
+            id: 123,
+            authorName: 'Test Author',
+            ebookMonitorFuture: false,
+            ebookMonitorExisting: 2,
+            audiobookMonitorFuture: true,
+            audiobookMonitorExisting: 0
+          }
+        }
+      },
+      put: async (url, payload) => {
+        expect(url).to.equal('/author/123')
+        expect(payload.audiobookMonitorFuture).to.be.false()
+        expect(payload.audiobookMonitorExisting).to.equal(2)
+        authorUpdated = true
+        return { data: payload }
+      }
+    }
+
+    await chaptarr.ensureAuthorUnmonitored(mockClient, 123, 'audiobook')
     expect(authorUpdated).to.be.true()
   })
 
@@ -376,6 +453,43 @@ describe('books - chaptarr client', function () {
       expect(res.synced_count).to.equal(2)
       expect(lookups[0]).to.equal('isbn:1111111111111')
       expect(lookups[1]).to.equal('Book 2 Author 2')
+    } finally {
+      chaptarr.getClient = origGetClient
+    }
+  })
+
+  it('should sync books list as audiobooks when specified', async function () {
+    process.env.CHAPTARR_API_KEY = 'test_key'
+    const nytBooks = [
+      { title: 'Audio Book 1', author: 'Author 1', isbn13: '9999999999999' }
+    ]
+
+    let postedPayload = null
+    const origGetClient = chaptarr.getClient
+    chaptarr.getClient = () => ({
+      get: async (url) => {
+        if (url.startsWith('/author/')) {
+          return { data: { id: 50, audiobookMonitorFuture: false, audiobookMonitorExisting: 2 } }
+        }
+        return { data: [{ title: 'Audio Book 1', author: { authorName: 'Author 1' } }] }
+      },
+      post: async (url, payload) => {
+        if (url === '/book') {
+          postedPayload = payload
+          return { data: { id: 500, title: payload.title, monitored: true, audiobookMonitored: true, authorId: 50 } }
+        }
+        return { data: { status: 'queued' } }
+      },
+      put: async (url, payload) => ({ data: payload })
+    })
+
+    try {
+      const res = await chaptarr.syncBooks(nytBooks, { mediaType: 'audiobook' })
+      expect(res.status).to.equal('success')
+      expect(res.mediaType).to.equal('audiobook')
+      expect(res.synced_count).to.equal(1)
+      expect(postedPayload.mediaType).to.equal('audiobook')
+      expect(postedPayload.audiobookMonitored).to.be.true()
     } finally {
       chaptarr.getClient = origGetClient
     }
@@ -455,6 +569,45 @@ describe('books - BooksIndex', function () {
       expect(result.books).to.eql(mockBooks)
       expect(result.hardcover.status).to.equal('success')
       expect(result.chaptarr.status).to.equal('success')
+    } finally {
+      chaptarr.syncBooks = origSyncBooks
+    }
+  })
+
+  it('should perform dual sync with distinct fiction and audio lists', async function () {
+    const fictionBooks = [{ title: 'Fiction Book', author: 'Author 1' }]
+    const audioBooks = [{ title: 'Audio Book', author: 'Author 2' }]
+
+    nyt.getBestSellers = async (list) => {
+      if (list === 'combined-print-and-e-book-fiction') return fictionBooks
+      if (list === 'audio-fiction') return audioBooks
+      return []
+    }
+
+    const booksIndex = new BooksIndex()
+    let hardcoverListCalled = null
+    booksIndex.syncHardcover = async (books, slug) => {
+      hardcoverListCalled = slug
+      return { status: 'success', matched_count: books.length }
+    }
+
+    const syncCalls = []
+    const origSyncBooks = chaptarr.syncBooks
+    chaptarr.syncBooks = async (books, options) => {
+      syncCalls.push({ books, options })
+      return { status: 'success', matched_count: books.length, synced_count: books.length }
+    }
+
+    try {
+      const result = await booksIndex.sync()
+      expect(result.status).to.equal('success')
+      expect(result.fiction.count).to.equal(1)
+      expect(result.fiction.books).to.eql(fictionBooks)
+      expect(result.audio.count).to.equal(1)
+      expect(result.audio.books).to.eql(audioBooks)
+      expect(syncCalls).to.have.length(2)
+      expect(syncCalls[0].options.mediaType).to.equal('ebook')
+      expect(syncCalls[1].options.mediaType).to.equal('audiobook')
     } finally {
       chaptarr.syncBooks = origSyncBooks
     }

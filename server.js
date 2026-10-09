@@ -142,10 +142,14 @@ const handleRequest = async function (req, res, listBuilderClass, cachePrefix) {
 app.get('/movies', (req, res, next) => handleRequest(req, res, Index, 'movies').catch(next))
 app.get('/anime', (req, res, next) => handleRequest(req, res, AnimeIndex, 'anime').catch(next))
 app.get('/books', (req, res, next) => handleRequest(req, res, BooksIndex, 'books').catch(next))
+app.get('/audiobooks', (req, res, next) => {
+  req.query = { list: 'audio-fiction', ...req.query }
+  return handleRequest(req, res, BooksIndex, 'books').catch(next)
+})
 
 let isSyncing = false
 
-const refreshBooksCache = (books) => {
+const refreshBooksCache = (books, audioBooks) => {
   if (Array.isArray(books) && books.length > 0) {
     const defaultKey = 'books_{}'
     cache.setKey(defaultKey, {
@@ -160,8 +164,24 @@ const refreshBooksCache = (books) => {
       timestamp: new Date().toISOString()
     }))
   }
-  // Clear any parameter-specific book cache entries (e.g. custom lists)
-  cache.keys().filter(k => k.startsWith('books_') && k !== 'books_{}').forEach(k => cache.removeKey(k))
+  if (Array.isArray(audioBooks) && audioBooks.length > 0) {
+    const audioKey = 'books_{"list":"audio-fiction"}'
+    cache.setKey(audioKey, {
+      value: audioBooks,
+      expiry: Date.now() + (24 * 60 * 60 * 1000)
+    })
+    console.log(JSON.stringify({
+      level: 'info',
+      event: 'books_cache_refreshed',
+      key: audioKey,
+      count: audioBooks.length,
+      timestamp: new Date().toISOString()
+    }))
+  }
+  // Clear any parameter-specific book cache entries (e.g. custom lists) except refreshed ones
+  cache.keys()
+    .filter(k => k.startsWith('books_') && k !== 'books_{}' && k !== 'books_{"list":"audio-fiction"}')
+    .forEach(k => cache.removeKey(k))
   cache.save(true)
 }
 
@@ -185,8 +205,10 @@ const handleBooksSync = async (req, res) => {
   try {
     const booksIndex = new BooksIndex()
     const result = await booksIndex.sync()
-    if (result && result.books) {
-      refreshBooksCache(result.books)
+    if (result) {
+      const fictionBooks = result.fiction ? result.fiction.books : result.books
+      const audioBooks = result.audio ? result.audio.books : null
+      refreshBooksCache(fictionBooks, audioBooks)
     }
     res.json(result)
   } catch (error) {
@@ -219,8 +241,10 @@ const runWeeklySync = async () => {
     try {
       const booksIndex = new BooksIndex();
       const result = await booksIndex.sync();
-      if (result && result.books) {
-        refreshBooksCache(result.books);
+      if (result) {
+        const fictionBooks = result.fiction ? result.fiction.books : result.books;
+        const audioBooks = result.audio ? result.audio.books : null;
+        refreshBooksCache(fictionBooks, audioBooks);
       }
       console.log('Automated weekly book sync completed successfully.');
     } catch (err) {
