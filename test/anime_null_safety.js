@@ -81,4 +81,16 @@ describe('anime - null safety and defensive parsing', function () {
     const match = imdbLink.url.match(/title\/(tt\d+)/)
     expect(match[1]).to.equal('tt22068940')
   })
+
+  it('should filter out MOVIE format entries to avoid TVDB movie ID collisions with Sonarr', function () {
+    const rawMedia = [
+      { id: 101, title: { english: 'TV Series Anime' }, format: 'TV' },
+      { id: 102, title: { english: 'Anime Movie' }, format: 'MOVIE' },
+      { id: 103, title: { english: 'ONA Anime' }, format: 'ONA' }
+    ]
+
+    const filtered = rawMedia.filter(m => !m.isAdult && m.format !== 'MOVIE')
+    expect(filtered.length).to.equal(2)
+    expect(filtered.map(m => m.id)).to.eql([101, 103])
+  })
 })
