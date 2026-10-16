@@ -249,6 +249,83 @@ describe('books - chaptarr client', function () {
     expect(resError).to.be.null()
   })
 
+  it('should select authentic book candidate over summaries and discussion guides', async function () {
+    const candidates = [
+      {
+        id: 1,
+        title: 'Summary: "Verity" by Colleen Hoover | Discussion Prompts',
+        author: { authorName: 'bestof.me' },
+        ratings: { votes: 53 }
+      },
+      {
+        id: 2,
+        title: 'Compendium of Verity: By colleen Hoover',
+        author: { authorName: 'marvel james' },
+        ratings: { votes: 4 }
+      },
+      {
+        id: 3,
+        title: 'Verity',
+        author: { authorName: 'Colleen Hoover' },
+        ratings: { votes: 4277009 }
+      }
+    ]
+
+    const mockClient = {
+      get: async () => ({ data: candidates })
+    }
+
+    const selected = await chaptarr.lookupBook(mockClient, 'VERITY Colleen Hoover', {
+      title: 'VERITY',
+      author: 'Colleen Hoover'
+    })
+
+    expect(selected).to.not.be.null()
+    expect(selected.id).to.equal(3)
+    expect(selected.title).to.equal('Verity')
+    expect(selected.author.authorName).to.equal('Colleen Hoover')
+  })
+
+  it('should select standalone book over omnibus collection or unknown author', async function () {
+    const candidates = [
+      {
+        id: 10,
+        title: 'The Empyrean Wing and Claw Series Standard Edition 4-Book Collection: Fourth Wing, Iron Flame, Onyx Storm, Threshing Day by Rebecca Yarros',
+        author: { authorName: 'Rebecca Yarros' },
+        ratings: { votes: 1174 }
+      },
+      {
+        id: 11,
+        title: 'Threshing Day (The Empyrean, #3.5)',
+        author: { authorName: 'Rebecca Yarros' },
+        ratings: { votes: 279803 }
+      }
+    ]
+
+    const best = chaptarr.findBestCandidate(candidates, {
+      title: 'THRESHING DAY',
+      author: 'Rebecca Yarros'
+    })
+
+    expect(best).to.not.be.null()
+    expect(best.id).to.equal(11)
+    expect(best.title).to.equal('Threshing Day (The Empyrean, #3.5)')
+
+    const unknownAuthorCandidates = [
+      { id: 20, title: 'Theo of Golden by Allen Levi', author: { authorName: 'Unknown Author' }, ratings: { votes: 0 } },
+      { id: 21, title: 'Theo of Golden', author: { authorName: 'Allen Levi' }, ratings: { votes: 683671 } }
+    ]
+
+    const bestTheo = chaptarr.findBestCandidate(unknownAuthorCandidates, {
+      title: 'THEO OF GOLDEN',
+      author: 'Allen Levi'
+    })
+
+    expect(bestTheo).to.not.be.null()
+    expect(bestTheo.id).to.equal(21)
+    expect(bestTheo.title).to.equal('Theo of Golden')
+  })
+
   it('should post book with correct ebook payload to /book', async function () {
     let postedPayload = null
     const mockClient = {
@@ -490,6 +567,50 @@ describe('books - chaptarr client', function () {
       expect(res.synced_count).to.equal(1)
       expect(postedPayload.mediaType).to.equal('audiobook')
       expect(postedPayload.audiobookMonitored).to.be.true()
+    } finally {
+      chaptarr.getClient = origGetClient
+    }
+  })
+
+  it('should handle 400 Bad Request error from Chaptarr gracefully without failing overall sync', async function () {
+    process.env.CHAPTARR_API_KEY = 'test_key'
+    const nytBooks = [
+      { title: 'Failing Book', author: 'Author 1', isbn13: '1111111111111' },
+      { title: 'Working Book', author: 'Author 2', isbn13: '2222222222222' }
+    ]
+
+    const origGetClient = chaptarr.getClient
+    chaptarr.getClient = () => ({
+      get: async (url, config) => {
+        if (url.startsWith('/author/')) {
+          return { data: { id: 50, audiobookMonitorFuture: false, audiobookMonitorExisting: 2 } }
+        }
+        const term = config?.params?.term || ''
+        if (term.includes('1111111111111') || term.includes('Failing Book')) {
+          return { data: [{ title: 'Failing Book', author: { authorName: 'Author 1' } }] }
+        }
+        return { data: [{ title: 'Working Book', author: { authorName: 'Author 2' } }] }
+      },
+      post: async (url, payload) => {
+        if (url === '/book') {
+          if (payload.title === 'Failing Book') {
+            const err = new Error('Request failed with status code 400')
+            err.response = { status: 400, data: { message: 'No audiobook edition survived metadata profile filtering' } }
+            throw err
+          }
+          return { data: { id: 501, title: payload.title, monitored: true, audiobookMonitored: true } }
+        }
+        return { data: { status: 'queued' } }
+      },
+      put: async (url, payload) => ({ data: payload })
+    })
+
+    try {
+      const res = await chaptarr.syncBooks(nytBooks, { mediaType: 'audiobook' })
+      expect(res.status).to.equal('success')
+      expect(res.matched_count).to.equal(2)
+      expect(res.synced_count).to.equal(1)
+      expect(res.books[0].id).to.equal(501)
     } finally {
       chaptarr.getClient = origGetClient
     }
